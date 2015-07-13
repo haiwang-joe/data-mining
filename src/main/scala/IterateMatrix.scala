@@ -7,23 +7,23 @@ import java.io._
 object MultipleMatrixProd {
   def main(args: Array[String]) {
     val sc = new SparkContext(new SparkConf().setAppName("MatrixMultiply").set("spark.serializer", "org.apache.spark.serializer.KryoSerializer"))
-    def getPair(s: String, mtype: String = "row") = {
+    def getPair(s: String, mType: String = "row") = {
       val infos = s.split('\t')
       val value = infos(1).toDouble
       val firstPart = infos(0).split(',')
       val row = firstPart(0).toInt
       val col = firstPart(1).toInt
-      if (mtype == "row") (row, (col, value))
+      if (mType == "row") (row, (col, value))
       else (col, (row, value))
     }
     def getMatrix(file: String) = sc.textFile(file).map(x => getPair(x)).groupByKey(4)
-    def getMatrixCol(file: String) = sc.textFile(file).map(x => getPair(x, mtype = "col")).groupByKey(1000)
+    def getMatrixCol(file: String) = sc.textFile(file).map(x => getPair(x, mType = "col")).groupByKey(1000)
     def rowColItemProd(a: Iterable[(Int, Double)], b: Iterable[(Int, Double)]): Double = {
-      val s = a.map(_._1).toSet intersect b.map(_._1).toSet
+      val keyIntersect = a.map(_._1).toSet intersect b.map(_._1).toSet
       val am = a.toMap
       val bm = b.toMap
       var result = 0D
-      for (key <- s) {
+      for (key <- keyIntersect) {
         result += am(key) * bm(key)
       }
       result
@@ -41,17 +41,18 @@ object MultipleMatrixProd {
         partNum += 1
         val idx = p.index
         val partB = b.mapPartitionsWithIndex((pIdx, partition) => if (pIdx == idx) partition else Iterator(), true)
-        val data = partB.collect()
+        val partBInArray = partB.collect()
         println("partNum: " + partNum)
-        val dataBroadcast = sc.broadcast(data)
-        val tmp = a.mapPartitions(
+        val pBroadcast = sc.broadcast(partBInArray)
+        // rowColItemProd(row._2, col._2) computed twice here, to be optimize
+        val partialResult = a.mapPartitions(
           iter => {
             iter.flatMap(row =>
-              dataBroadcast.value.filter {
+              pBroadcast.value.filter {
                 col => rowColItemProd(row._2, col._2) != 0D
               }.map(col => (row._1, (col._1, rowColItemProd(row._2, col._2)))))
           }, true)
-        tmp.saveAsTextFile("hdfs://hdbm0.hy01:54310/user/fangyuanli/data/matrix_" + resultName + "_" + partNum + ".out")
+        partialResult.saveAsTextFile("hdfs://hdbm0.hy01:54310/user/fangyuanli/data/matrix_" + resultName + "_" + partNum + ".out")
       }
 
     }
@@ -63,6 +64,7 @@ object MultipleMatrixProd {
 
     val mgp = getMatrix("hdfs://hdbm0.hy01:54310/user/fangyuanli/data/matrix_g_p_*").cache()
 
+    // getMatrixCol should be replaced by getMatrix if the data format in matrix_p_g.out is (g,p "\t" value)
     val mpg = getMatrixCol("hdfs://hdbm0.hy01:54310/user/fangyuanli/data/matrix_p_g.out").cache()
 
     multiplyMat(mgp, mpg, "g_g")
